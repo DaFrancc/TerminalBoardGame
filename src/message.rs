@@ -9,23 +9,26 @@ use crate::data::PlayerSerialize;
 
 /// Message to be sent during lobby phase.
 /// Can be sent internally or to clients.
+/// `T` must be an enum.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientStartMessage<T> {
     Join(String),
     VoteStart(bool),
     Exit,
-    Other(T)
+    Custom(T)
 }
 /// Message to be sent during lobby phase.
 /// Sent by clients to server.
+/// `T` must be an enum.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerStartMessage<T> {
     Join(String),
     VoteStart(bool),
     Exit,
-    Other(T)
+    Custom(T)
 }
 /// Types of messages client will send to server.
+/// `T` must be a struct.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ServerMessage<T> {
     PlayerAction(T),
@@ -33,6 +36,7 @@ pub enum ServerMessage<T> {
     Exit,
 }
 /// Types of messages that client threads will send to main server thread.
+/// `T` must be an enum.
 #[derive(Debug, Clone)]
 pub enum InternalMessage<T> {
     /// Information of a player leaving the game
@@ -46,12 +50,14 @@ pub enum InternalMessage<T> {
     VoteStart(String, bool),
     /// Server kicking client
     Kick(String),
-    Other(T)
+    Custom(T)
 }
 /// Types of messages server will send to client threads whom will then
 /// propagate it to their clients.
+/// `T` must be a struct.
+/// `U` must be an enum.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ClientMessage<T, U> {
+pub enum ClientMessage<T: Clone, U> {
     SendAll(Vec<PlayerSerialize<T>>),
     /// Information that a player has won
     PlayerWon(String),
@@ -71,7 +77,7 @@ pub enum ClientMessage<T, U> {
     VoteStart(String, bool, u8, u8),
     /// Server kicking client
     Kick(String),
-    Other(U)
+    Custom(U)
 }
 
 
@@ -116,12 +122,12 @@ pub async fn deserialize_message<T: DeserializeOwned>(stream: &mut TcpStream) ->
     }
 }
 
-pub async fn receive_message<T>(stream: &mut TcpStream) -> Option<T> {
+pub async fn receive_message<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Option<T> {
     let result = deserialize_message(stream).await;
     result.unwrap_or_else(|_| None)
 }
 
-pub async fn receive_message_with_timeout<T>(stream: &mut TcpStream, duration: Duration) -> Option<T> {
+pub async fn receive_message_with_timeout<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream, duration: Duration) -> Option<T> {
     let timeout_result = timeout(duration, deserialize_message(stream)).await;
     match timeout_result {
         Ok(x) => {

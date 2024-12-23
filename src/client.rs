@@ -1,12 +1,12 @@
 use std::io;
+use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use crate::error::TBGError;
 use crate::data::PlayerSerialize;
-use crate::message;
 use crate::message::{serialize_message, ServerStartMessage};
 
-pub async fn join_server_with_ip(ip: String) -> Result<(), TBGError> {
+pub async fn join_server_with_ip<T: Serialize>(ip: String) -> Result<(), TBGError> {
     let mut name = String::new();
     loop {
         println!("Enter your name:");
@@ -28,7 +28,7 @@ pub async fn join_server_with_ip(ip: String) -> Result<(), TBGError> {
     };
 
     let mut players: Vec<PlayerSerialize<Option<Vec<u8>>>> = vec![];
-    stream.write_all(serialize_message(&ServerStartMessage::Join(name.clone())).as_slice()).await?;
+    stream.write_all(serialize_message(&ServerStartMessage::<T>::Join(name.clone())).as_slice()).await?;
 
     Ok(())
 }
