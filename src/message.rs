@@ -18,7 +18,7 @@ pub enum ClientStartMessage<T> {
     Custom(T)
 }
 /// Message to be sent during lobby phase.
-/// Sent by clients to server.
+/// Sent by clients to client threads.
 /// `T` must be an enum.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerStartMessage<T> {

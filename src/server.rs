@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
@@ -8,18 +7,19 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::mpsc::Sender;
+use crossterm::style::{style, Attribute, Color, Stylize};
 use tokio::time::timeout;
 use crate::error::TBGError;
 use crate::data::{PlayerInfo, PlayerSerialize, PlayersList};
-use crate::message::{deserialize_message, receive_message, receive_message_with_timeout, serialize_message, ClientMessage, InternalMessage, ServerStartMessage};
+use crate::message::{receive_message_with_timeout, serialize_message, ClientMessage, ClientStartMessage, InternalMessage, ServerMessage, ServerStartMessage};
 
 async fn serialize_players<T: Clone>(players_list: Arc<PlayersList<T>>, include_data: bool) -> Vec<PlayerSerialize<Option<T>>> {
-    let mut players = players_list.get_players().await;
+    let players = players_list.read_players().await;
     let mut v = Vec::new();
     for player in players.iter() {
         v.push(PlayerSerialize {
-            name: player.name.clone(),
-            data: if include_data { Some(player.data.clone()) } else { None },
+            name: player.lock().await.name.clone(),
+            data: if include_data { Some(player.lock().await.data.clone()) } else { None },
         });
     }
 
@@ -30,7 +30,7 @@ async fn client_join<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Serializ
     mut stream: TcpStream,
     players_list: Arc<PlayersList<T>>,
     num_players: Arc<AtomicU8>)
-    -> Result<(), TBGError>
+    -> Result<usize, TBGError>
 {
     let message: ServerStartMessage<T> = match receive_message_with_timeout(&mut stream, Duration::from_secs(30)).await {
         Some(x) => x,
@@ -44,19 +44,28 @@ async fn client_join<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Serializ
             if name.is_empty() {
                 return Err(TBGError::InvalidName)
             }
-            if let Err(_) = players_list.add_player(name.clone(), stream, None).await {
-                eprintln!("Player with name {name} already joined");
+            let mut player_id = match players_list.add_player(name.clone(), stream, None).await {
+                Ok(x) => x,
+                Err((mut s, _)) => {
+                    eprintln!("Player with name {name} already joined");
 
-                stream.write_all(serialize_message(&ClientMessage::<T, U>::RejectClient(name)).as_slice()).await?;
-                return Err(TBGError::InvalidName);
-            }
-            stream.write_all(serialize_message(&ClientMessage::<Option<T>, U>::SendAll(serialize_players(players_list.clone(), false).await)).as_slice()).await?;
+                    s.write_all(serialize_message(&ClientMessage::<T, U>::RejectClient(name)).as_slice()).await?;
+                    s.flush().await.unwrap_or_else(|e| eprintln!("Failed to flush client to disk: {}", e));
+                    return Err(TBGError::InvalidName);
+                },
+            };
+            let players_lock = players_list.read_players().await;
+            let player = match players_list.get_player(player_id).await {
+                Some(p) => p,
+                None => return Err(TBGError::Other(format!("Player with name {} not found. Failed to add to player list", name))),
+            };
+            player.stream.write_all(serialize_message(&ClientMessage::<Option<T>, U>::SendAll(serialize_players(players_list.clone(), false).await)).as_slice()).await?;
             println!("{name} joined");
 
             num_players.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+            Ok(player_id)
         },
-        _ => Ok(())
+        _ => Err(TBGError::FailToConnect(stream.peer_addr()?.to_string())),
     }
 }
 pub async fn client_thread<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Serialize>(
@@ -67,7 +76,12 @@ pub async fn client_thread<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Se
     mut broadcast_rx: Receiver<ClientMessage<T, U>>,
     mpsc_tx: Sender<InternalMessage<U>>) -> Result<(), TBGError>
 {
-    match client_join::<T, U>(stream, players, num_players.clone()).await {
+    let player_id = match client_join::<T, U>(stream, players.clone(), num_players.clone()).await {
+        Ok(id) => id,
+        Err(e) => return Err(e)
+    };
+
+    match client_in_lobby::<T, U>(player_id, players.clone(), num_players.clone(), num_votes.clone(), broadcast_rx, mpsc_tx).await {
         Ok(_) => {},
         Err(e) => return Err(e)
     }
@@ -75,11 +89,116 @@ pub async fn client_thread<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Se
     Ok(())
 }
 
+async fn client_in_lobby<T: Clone + Serialize + for<'a> Deserialize<'a>, U: Serialize>(
+    player_id: usize,
+    players_list: Arc<PlayersList<T>>,
+    num_players: Arc<AtomicU8>,
+    num_votes: Arc<AtomicU8>,
+    mut broadcast_rx: Receiver<ClientMessage<T, U>>,
+    mpsc_tx: Sender<InternalMessage<U>>) -> Result<(), TBGError>
+{
+    let name = {
+        let players_lock = players_list.read_players().await;
+        let player = match players_list.get_player(player_id).await {
+            Some(p) => p,
+            None => return Err(TBGError::Other(format!("Player with id {} not found. Failed to add to player list", player_id))),
+        };
+        player.name.clone()
+    };
+
+    'lobby_loop: loop {
+        if let Ok(msg) = broadcast_rx.try_recv() {
+            let serialized: Result<ClientMessage<T, U>, TBGError> = match msg {
+                ClientMessage::StartGame => Ok(ClientMessage::StartGame),
+                ClientMessage::PlayerLeft(p_name) => Ok(ClientMessage::PlayerLeft(p_name)),
+                ClientMessage::AcceptClient(p_name) => Ok(ClientMessage::AcceptClient(p_name)),
+                ClientMessage::VoteStart(p_name, p_vote, n_votes, n_players) =>
+                    Ok(ClientMessage::VoteStart(p_name, p_vote, n_votes, n_players)),
+                ClientMessage::Kick(p_name) => Ok(ClientMessage::Kick(p_name)),
+                _ => Err(TBGError::Other(String::from("Unknown message type"))),
+            };
+            match serialized {
+                Ok(s) => {
+                    let players_lock = players_list.read_players().await;
+                    let player = match players_list.get_player(player_id).await {
+                        Some(p) => p,
+                        None => return Err(TBGError::Other(format!("Player with name {} not found. Failed to add to player list", name))),
+                    };
+                    player.stream.write_all(serialize_message(&s).as_slice()).await?;
+
+                    match s {
+                        ClientMessage::Kick(p_name) if p_name == name => {
+                            return Err(TBGError::Other(String::from("Player kicked")));
+                        },
+                        ClientMessage::StartGame => {
+                            return Ok(())
+                        },
+                        _ => {},
+                    }
+                }
+                Err(_) => eprintln!("Failed to send message to client"),
+            }
+        }
+
+        let players = players_list.read_players().await;
+        let player = match players_list.get_player(player_id).await {
+            Some(p) => p,
+            None => return Err(TBGError::Other(format!("Player with id {} not found. Failed to add to player list", player_id))),
+        };
+        let message = match receive_message_with_timeout::<ServerStartMessage<U>>(
+            &mut player.stream, Duration::from_millis(20)).await
+        {
+            Some(m) => m,
+            None => continue,
+        };
+        // Read message content
+        match message {
+            ServerStartMessage::VoteStart(vote) => {
+                if vote == player.start_game {
+                    continue
+                } else if vote && !player.start_game {
+                    num_votes.fetch_add(1, Ordering::SeqCst);
+                } else if !vote && player.start_game {
+                    num_votes.fetch_sub(1, Ordering::SeqCst);
+                }
+                player.start_game = vote;
+                let n_votes = num_votes.load(Ordering::SeqCst);
+                let n_people = num_players.load(Ordering::SeqCst);
+
+                if let Err(_) = mpsc_tx.send(InternalMessage::VoteStart(player.name.clone(), vote)).await {
+                    eprintln!("Failed to send message to server");
+                }
+
+                print!("{} voted ", player.name);
+                if vote {
+                    print!("{}", style("YES").with(Color::Green).attribute(Attribute::Bold).attribute(Attribute::Underlined));
+                } else {
+                    print!("{}", style("NO").with(Color::Red).attribute(Attribute::Bold).attribute(Attribute::Underlined));
+                }
+                println!(" to start game ({}/{})", n_votes, n_people);
+            }
+            ServerStartMessage::Exit => {
+                if let Err(_) = mpsc_tx.send(InternalMessage::PlayerLeft(player.name.clone())).await {
+                    eprintln!("Failed to send message to server");
+                }
+                println!("{} left", player.name);
+                num_players.fetch_sub(1, Ordering::SeqCst);
+                if player.start_game {
+                    num_votes.fetch_sub(1, Ordering::SeqCst);
+                }
+                players_list.remove_player(player_id).await;
+                return Ok(())
+            }
+            _ => continue,
+        }
+    }
+}
+
 /// Master server thread that handles main game logic and loop and handles
 /// input and output to its client threads.
 /// T - Custom player data (i.e. dice, cards, other game attributes)
 /// U - Custom player actions
-pub async fn server_thread<T: Clone + Serialize + for<'a> Deserialize<'a> + Send  + Sync + 'static, U: Clone + Serialize + Send + 'static>(
+pub async fn server_thread<T: Clone + Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static, U: Clone + Serialize + Send + 'static>(
     listen_ip: String,
     broadcast_capacity: usize,
     mpsc_capacity: usize,
@@ -127,11 +246,7 @@ pub async fn server_thread<T: Clone + Serialize + for<'a> Deserialize<'a> + Send
                 server_tx.clone()
             ).await;
         }
-
-
     }
-
-    Ok(())
 }
 
 async fn accept_new_client<T: Clone + Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static,
@@ -167,8 +282,8 @@ async fn accept_new_client<T: Clone + Serialize + for<'a> Deserialize<'a> + Send
     false
 }
 
-fn receive_client_message<T: Clone + Serialize + for<'a> Deserialize<'a> + Send + Sync + 'static,
-    U: Clone + Serialize + Send + 'static>(
+fn receive_client_message<T: Clone + Serialize + for<'a> Deserialize<'a> + Send + Sync,
+    U: Clone + Serialize + Send>(
     min_players: u8,
     min_votes_proportion: f64,
     num_players_atomic: Arc<AtomicU8>,
