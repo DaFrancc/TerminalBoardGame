@@ -27,7 +27,7 @@ pub async fn join_server_with_ip<T: Serialize>(ip: String) -> Result<(), TBGErro
         Err(e) => return Err(TBGError::FailToConnect(e.to_string()))
     };
 
-    let mut players: Vec<PlayerSerialize<Option<Vec<u8>>>> = vec![];
+    let players: Vec<PlayerSerialize<Option<Vec<u8>>>> = vec![];
     stream.write_all(serialize_message(&ServerStartMessage::<T>::Join(name.clone())).as_slice()).await?;
 
     Ok(())

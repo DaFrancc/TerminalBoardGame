@@ -57,7 +57,7 @@ pub enum InternalMessage<T> {
 /// `T` must be a struct.
 /// `U` must be an enum.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ClientMessage<T: Clone, U> {
+pub enum ClientMessage<T: Clone, U: Clone> {
     SendAll(Vec<PlayerSerialize<T>>),
     /// Information that a player has won
     PlayerWon(String),
