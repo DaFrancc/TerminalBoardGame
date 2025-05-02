@@ -1,6 +1,6 @@
 use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -27,12 +27,12 @@ pub(crate) struct PlayerSerialize<T: Clone> {
 /// Struct that simplifies accessing the player list. Should not be accessed
 /// directly, only through the provided functions.
 pub(crate) struct PlayersList<T: Clone> {
-    players: RwLock<IndexMap<usize, Arc<Mutex<PlayerInfo<T>>>>>,
+    players: RwLock<HashMap<usize, Arc<Mutex<PlayerInfo<T>>>>>,
 }
 
 impl<T: Clone> PlayersList<T> {
     pub(crate) fn new() -> Self {
-        Self { players: RwLock::new(IndexMap::new()) }
+        Self { players: RwLock::new(HashMap::new()) }
     }
     pub(crate) async fn add_player(&self, name: String, stream: TcpStream, data: Option<T>) -> Result<usize, (TcpStream, TBGError)> {
         if !self.contains_player(name.clone()).await {
@@ -44,7 +44,7 @@ impl<T: Clone> PlayersList<T> {
         Err((stream, TBGError::InvalidName))
     }
     pub(crate) async fn remove_player(&self, id: usize) -> Option<Arc<Mutex<PlayerInfo<T>>>> {
-        self.players.write().await.shift_remove(&id)
+        self.players.write().await.remove(&id)
     }
     pub(crate) async fn contains_player(&self, other_name: String) -> bool {
         // self.read_players().await.values().any(async |p| p.lock().await.name == other_name)
@@ -57,14 +57,14 @@ impl<T: Clone> PlayersList<T> {
         false
     }
 
-    pub(crate) async fn read_players(&self) -> tokio::sync::RwLockReadGuard<'_, IndexMap<usize, Arc<Mutex<PlayerInfo<T>>>>> {
+    pub(crate) async fn read_players(&self) -> tokio::sync::RwLockReadGuard<'_, HashMap<usize, Arc<Mutex<PlayerInfo<T>>>>> {
         self.players.read().await
     }
 
     pub(crate) async fn get_player<'a>(
         &'a self,
         id: usize,
-    ) -> Option<(RwLockReadGuard<'a, IndexMap<usize, Arc<Mutex<PlayerInfo<T>>>>>, Arc<Mutex<PlayerInfo<T>>>)> {
+    ) -> Option<(RwLockReadGuard<'a, HashMap<usize, Arc<Mutex<PlayerInfo<T>>>>>, Arc<Mutex<PlayerInfo<T>>>)> {
         let players = self.players.read().await; // Acquire the read lock
         match players.clone().get(&id).clone() {
             Some(p) => Some((players, p.clone())),

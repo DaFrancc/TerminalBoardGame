@@ -1,3 +1,9 @@
+[build]
+rustflags = ["-D", "warnings"]
+
+[alias]
+check = "clippy -- -D warnings"
+
 [package]
 name = "TerminalBoardGame"
 version = "0.1.0"
