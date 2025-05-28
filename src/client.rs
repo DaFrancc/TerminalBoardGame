@@ -28,7 +28,13 @@ pub async fn join_server_with_ip<T: Serialize>(ip: String) -> Result<(), TBGErro
     };
 
     let players: Vec<PlayerSerialize<Option<Vec<u8>>>> = vec![];
-    stream.write_all(serialize_message(&ServerStartMessage::<T>::Join(name.clone())).as_slice()).await?;
+    let msg = match serialize_message(&ServerStartMessage::<T>::Join(name.clone())) {
+        Ok(x) => x,
+        Err(e) => {println!("{}", e);
+        return Err(TBGError::JsonError(String::from("Failed to serialize.")));
+    }
+    };
+    stream.write_all(msg.as_slice()).await?;
 
     Ok(())
 }

@@ -1,5 +1,6 @@
-use std::{fmt, io};
+use crossterm::terminal::SetSize;
 use serde::Deserialize;
+use std::{f32::consts::E, fmt, io};
 
 #[derive(Debug, Deserialize)]
 pub enum TBGError {
@@ -41,3 +42,57 @@ impl From<serde_json::Error> for TBGError {
         TBGError::JsonError(e.to_string())
     }
 }
+
+/* Message passing errors */
+
+#[derive(Debug, Deserialize)]
+pub enum MessageError {
+    FailSerialize,
+    DataStreamEarlyEOF,
+    MessageOverflow(usize),
+    SizeMismatch(usize, usize),
+    FailDeserialize,
+    TimedOut
+
+}
+
+impl fmt::Display for MessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageError::FailSerialize => write!(f, "Failure to serialize string"),
+            MessageError::DataStreamEarlyEOF => write!(f, "Data stream ended early"),
+            MessageError::MessageOverflow(size) => {
+                write!(f, "Incoming message size of {size} bytes too large")
+            }
+            MessageError::SizeMismatch(read, expected) => {
+                write!(f, "Read {read} bytes but expected {expected} bytes.")
+            },
+            MessageError::FailDeserialize => write!(f, "Failure to deserialize message."),
+            MessageError::TimedOut => write!(f, "No message received before timeout ended.")
+        }
+    }
+}
+
+impl std::error::Error for MessageError {}
+
+/* Player List errors */
+
+#[derive(Debug)]
+
+pub enum PlayerListError {
+    DuplicateEntry,
+    InvalidID,
+}
+
+impl fmt::Display for PlayerListError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlayerListError::DuplicateEntry => {
+                write!(f, "Name is already taken or otherwise invalid.")
+            }
+            PlayerListError::InvalidID => write!(f, "No pair found for given ID."),
+        }
+    }
+}
+
+impl std::error::Error for PlayerListError {}
