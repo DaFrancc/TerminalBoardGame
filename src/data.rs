@@ -1,4 +1,4 @@
-use crate::error::PlayerListError;
+use crate::error::TBGError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,7 +55,7 @@ impl<T: Clone> PlayersList<T> {
         name: String,
         stream: TcpStream,
         data: Option<T>,
-    ) -> Result<usize, (TcpStream, PlayerListError)> {
+    ) -> Result<usize, (TcpStream, TBGError)> {
         if !self.contains_player(name.clone()).await {
             let mut players = self.players.write().await;
             let id = LOOKUP_INDEX.fetch_add(1, Ordering::SeqCst);
@@ -71,27 +71,34 @@ impl<T: Clone> PlayersList<T> {
             );
             return Ok(id);
         }
-        Err((stream, PlayerListError::DuplicateEntry))
+        Err((stream, TBGError::DuplicateEntry))
     }
 
     /// Removes player. Returns an option
-    pub(crate) async fn remove_player(&self, id: usize) -> Result<PlayerInfo<T>, PlayerListError> {
+    pub(crate) async fn remove_player(&self, id: usize) -> Result<PlayerInfo<T>, TBGError> {
         match self.players.write().await.remove(&id) {
             Some(player) => Ok(player),
-            None => Err(PlayerListError::InvalidID),
+            None => Err(TBGError::InvalidID),
         }
     }
 
     /// True if name exists, false otherwise
     pub(crate) async fn contains_player(&self, other_name: String) -> bool {
-        let players = self.read_players().await;
+        let players = self.read().await;
         players.values().any(|player| player.name == other_name)
     }
 
     /// Returns RwLock of the players list
-    pub(crate) async fn read_players(
+    pub(crate) async fn read(
         &self,
     ) -> tokio::sync::RwLockReadGuard<'_, HashMap<usize, PlayerInfo<T>>> {
         self.players.read().await
+    }
+
+    /// Returns RwLock of the players list
+    pub(crate) async fn write(
+        &mut self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<usize, PlayerInfo<T>>> {
+        self.players.write().await
     }
 }

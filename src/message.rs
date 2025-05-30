@@ -1,11 +1,19 @@
 use crate::data::PlayerSerialize;
-use crate::error::MessageError;
+use crate::error::TBGError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+
+#[repr(u8)]
+pub enum WaitTimeSec {
+    Quick = 1,
+    Short = 5,
+    Med = 10,
+    Long = 30
+}
 
 /// Message to be sent during lobby phase.
 /// Can be sent internally or to clients.
@@ -82,10 +90,10 @@ pub enum ClientMessage<T: Clone, U: Clone> {
 
 const MAX_MESSAGE_LENGTH: usize = 1024;
 
-pub fn serialize_message<T: Serialize>(input: &T) -> Result<Vec<u8>, MessageError> {
+pub fn serialize_message<T: Serialize>(input: &T) -> Result<Vec<u8>, TBGError> {
     let input_string = match serde_json::to_string(&input) {
         Ok(s) => s,
-        Err(_) => return Err(MessageError::FailSerialize),
+        Err(_) => return Err(TBGError::FailSerialize),
     };
     let serialized = input_string.as_bytes();
     let length: u32 = serialized.len() as u32;
@@ -98,39 +106,39 @@ pub fn serialize_message<T: Serialize>(input: &T) -> Result<Vec<u8>, MessageErro
 
 pub async fn deserialize_message<T: DeserializeOwned>(
     stream: &mut TcpStream,
-) -> Result<Option<T>, MessageError> {
+) -> Result<T, TBGError> {
     let mut len_buf: [u8; 4] = [0; 4];
-    if let Err(e) = stream.read_exact(&mut len_buf).await {
-        return Err(MessageError::DataStreamEarlyEOF);
+    if let Err(_) = stream.read_exact(&mut len_buf).await {
+        return Err(TBGError::DataStreamEarlyEOF)
     }
     let length = u32::from_le_bytes(len_buf) as usize;
 
     if length > MAX_MESSAGE_LENGTH {
-        return Err(MessageError::MessageOverflow(length));
+        return Err(TBGError::MessageOverflow(length))
+    }
+    else if length == 0 {
+        return Err(TBGError::EmptyMessage)
     }
 
     let mut buffer = vec![0; length];
-    match stream.read_exact(&mut buffer).await {
-        Err(e) => return Err(MessageError::DataStreamEarlyEOF),
-        Ok(_) => {
-            if buffer.len() < length {
-                return Err(MessageError::SizeMismatch(buffer.len(), length));
-            }
-        }
+
+    if let Err(_) = stream.read_exact(&mut buffer).await {
+        return Err(TBGError::DataStreamEarlyEOF)
     }
+
     match serde_json::from_slice::<T>(&buffer[..length]) {
-        Ok(message) => Ok(Some(message)),
-        Err(_) => Err(MessageError::FailDeserialize),
+        Ok(message) => Ok(message),
+        Err(_) => Err(TBGError::FailDeserialize),
     }
 }
 
 pub async fn receive_message_with_timeout<T: for<'de> Deserialize<'de>>(
     stream: &mut TcpStream,
     duration: Duration,
-) -> Result<Option<T>, MessageError> {
+) -> Result<T, TBGError> {
     let timeout_result = timeout(duration, deserialize_message(stream)).await;
     match timeout_result {
         Ok(x) => x,
-        Err(_) => Err(MessageError::TimedOut),
+        Err(_) => Err(TBGError::TimeOut),
     }
 }
