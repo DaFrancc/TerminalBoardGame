@@ -1,32 +1,23 @@
-use std::time::Duration;
+use crate::data::PlayerSerialize;
 use crate::error::TBGError;
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use crate::data::PlayerSerialize;
 
 /// Message to be sent during lobby phase.
-/// Can be sent internally or to clients.
+/// Can be sent by and to anyone
 /// `T` must be an enum.
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ClientStartMessage<T> {
+pub enum StartMessage<T> {
     Join(String),
     VoteStart(bool),
     Exit,
-    Custom(T)
+    Custom(T),
 }
-/// Message to be sent during lobby phase.
-/// Sent by clients to client threads.
-/// `T` must be an enum.
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ServerStartMessage<T> {
-    Join(String),
-    VoteStart(bool),
-    Exit,
-    Custom(T)
-}
+
 /// Types of messages client will send to server.
 /// `T` must be a struct.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -50,7 +41,7 @@ pub enum InternalMessage<T> {
     VoteStart(String, bool),
     /// Server kicking client
     Kick(String),
-    Custom(T)
+    Custom(T),
 }
 /// Types of messages server will send to client threads whom will then
 /// propagate it to their clients.
@@ -77,9 +68,8 @@ pub enum ClientMessage<T: Clone, U: Clone> {
     VoteStart(String, bool, u8, u8),
     /// Server kicking client
     Kick(String),
-    Custom(U)
+    Custom(U),
 }
-
 
 pub fn serialize_message<T: Serialize>(input: &T) -> Vec<u8> {
     let input_string = serde_json::to_string(&input).unwrap();
@@ -92,33 +82,41 @@ pub fn serialize_message<T: Serialize>(input: &T) -> Vec<u8> {
     vec
 }
 
-pub async fn deserialize_message<T: DeserializeOwned>(stream: &mut TcpStream) -> Result<Option<T>, TBGError> {
+pub async fn deserialize_message<T: DeserializeOwned>(
+    stream: &mut TcpStream,
+) -> Result<Option<T>, TBGError> {
     let mut len_buf: [u8; 4] = [0; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(0) => return Ok(None),
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => return Err(TBGError::IoError(e.to_string())),
     }
     let length = u32::from_le_bytes(len_buf) as usize;
 
     if length > 1024 {
-        return Err(TBGError::IoError(format!("Length of message is too large, {length} bytes")));
+        return Err(TBGError::IoError(format!(
+            "Length of message is too large, {length} bytes"
+        )));
     }
 
     let mut buffer = vec![0; length];
     match stream.read_exact(&mut buffer).await {
-        Err(e) => {
-            return Err(TBGError::IoError(e.to_string()))
-        },
+        Err(e) => return Err(TBGError::IoError(e.to_string())),
         Ok(_) => {
             if buffer.len() < length {
-                return Err(TBGError::IoError(format!("Read {} bytes but expected {} bytes", buffer.len(), length)));
+                return Err(TBGError::IoError(format!(
+                    "Read {} bytes but expected {} bytes",
+                    buffer.len(),
+                    length
+                )));
             }
-        },
+        }
     }
     match serde_json::from_slice::<T>(&buffer[..length]) {
         Ok(message) => Ok(Some(message)),
-        Err(_) => Err(TBGError::JsonError(String::from("Problem deserializing string"))),
+        Err(_) => Err(TBGError::JsonError(String::from(
+            "Problem deserializing string",
+        ))),
     }
 }
 
@@ -127,12 +125,13 @@ pub async fn receive_message<T: for<'de> Deserialize<'de>>(stream: &mut TcpStrea
     result.unwrap_or_else(|_| None)
 }
 
-pub async fn receive_message_with_timeout<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream, duration: Duration) -> Option<T> {
+pub async fn receive_message_with_timeout<T: for<'de> Deserialize<'de>>(
+    stream: &mut TcpStream,
+    duration: Duration,
+) -> Option<T> {
     let timeout_result = timeout(duration, deserialize_message(stream)).await;
     match timeout_result {
-        Ok(x) => {
-            x.unwrap_or_else(|_| None)
-        },
+        Ok(x) => x.unwrap_or_else(|_| None),
         Err(_) => None,
     }
 }
