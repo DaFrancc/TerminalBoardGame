@@ -1,5 +1,8 @@
 use crate::data::PlayerSerialize;
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::Mutex; // Import Mutex for interior mutability
 
 #[derive(Debug, Clone)]
 pub enum GameEvent<T: Clone> {
@@ -26,30 +29,142 @@ pub enum GameEvent<T: Clone> {
     // You can use T for extensibility
 }
 
-pub struct EventBus<T: Clone> {
-    sender: broadcast::Sender<GameEvent<T>>,
+// 1. The Core Trait (Unchanged)
+pub trait IsEvent: 'static {
+    type Data: 'static;
 }
 
-impl<T: Clone + Send + Sync + 'static> EventBus<T> {
-    pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(128);
-        Self { sender }
-    }
+// 2. The Boilerplate-Reduction Macro (Unchanged)
+macro_rules! define_events {
+    ( $( $topic:ident => $data_type:ty ),* ) => {
+        $(
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            pub struct $topic;
 
-    pub fn emit(&self, event: GameEvent<T>) {
-        let _ = self.sender.send(event);
-    }
-
-    pub fn register_handler<F>(&self, mut handler: F)
-    where
-        F: FnMut(GameEvent<T>) + Send + 'static,
-    {
-        let mut rx = self.sender.subscribe();
-
-        tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                handler(event.clone());
+            impl IsEvent for $topic {
+                type Data = $data_type;
             }
+        )*
+    };
+}
+
+// 3. Concrete Data Structures for Events (Unchanged)
+#[derive(Debug, Clone)]
+pub struct WagerData {
+    pub player_name: String,
+    pub amount1: u8,
+    pub amount2: u8,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SendAllData<T: Clone> {
+    pub player_data: Vec<PlayerSerialize<T>>,
+}
+
+// 4. Declarative Event Definition (Unchanged)
+define_events! {
+    PlayerJoined => String,
+    PlayerLeft => String,
+    VoteStartGame => bool,
+    StartGame => (),
+    AcceptClient => String,
+    RejectClient => String,
+    TimeoutClient => String,
+    Kick => String,
+    SendAll => SendAllData,
+    Wager => WagerData,
+    MutePlayer => i32,
+    SetVolume => i32,
+    ServerShutdown => ()
+}
+
+// 5. The Event Manager (Now supporting FnMut)
+pub struct EventManager {
+    // The value stored is now a Vec of Mutex-wrapped, boxed FnMut closures.
+    subscribers: HashMap<TypeId, Box<dyn Any + Send + Sync>>, // Send + Sync are good practice with Mutex
+}
+
+impl EventManager {
+    pub fn new() -> Self {
+        Self {
+            subscribers: HashMap::new(),
+        }
+    }
+
+    /// Subscribes a mutable closure (FnMut) to an event.
+    /// The callback can now mutate its captured environment.
+    pub fn subscribe<T: IsEvent>(
+        &mut self,
+        callback: impl FnMut(&T::Data) + 'static + Send + Sync,
+    ) {
+        // CHANGED: Fn to FnMut, added Send + Sync
+        let topic_id = TypeId::of::<T>();
+        let entry = self.subscribers.entry(topic_id).or_insert_with(|| {
+            // The Vec now holds Mutex-wrapped closures.
+            Box::new(Vec::<Mutex<Box<dyn FnMut(&T::Data) + 'static + Send + Sync>>>::new())
+            // CHANGED: Wraps closure in Mutex
         });
+
+        entry
+            .downcast_mut::<Vec<Mutex<Box<dyn FnMut(&T::Data) + 'static + Send + Sync>>>>() // CHANGED: Downcasts to the Mutex<...> type
+            .unwrap()
+            .push(Mutex::new(Box::new(callback))); // CHANGED: The new callback is wrapped in a Mutex
+    }
+
+    /// Emits an event.
+    pub fn emit<T: IsEvent>(&self, data: &T::Data) {
+        let topic_id = TypeId::of::<T>();
+        if let Some(subscribers_any) = self.subscribers.get(&topic_id) {
+            if let Some(subscribers) = subscribers_any
+                .downcast_ref::<Vec<Mutex<Box<dyn FnMut(&T::Data) + 'static + Send + Sync>>>>()
+            // CHANGED: Downcasts to the Mutex<...> type
+            {
+                for callback_mutex in subscribers {
+                    // Lock the mutex to get mutable access to the closure.
+                    // This blocks if another thread were using it, ensuring safety.
+                    let mut callback = callback_mutex.lock().unwrap();
+                    // Now call the FnMut closure.
+                    callback(data);
+                }
+            }
+        }
     }
 }
+
+// 6. Callback Functions (Unchanged)
+fn player_joined(name: &String) {
+    println!("[Fn Callback] {} joined the game.", name);
+}
+
+// // 7. Main Application Logic
+// fn main() {
+//     println!("Initializing event system...");
+//     let mut events = EventManager::new();
+//
+//     // Subscribe a regular function (which acts like Fn).
+//     events.subscribe::<PlayerJoined>(player_joined);
+//
+//     // Subscribe a stateful, mutable closure (FnMut).
+//     // `times_muted` is now correctly declared as mutable.
+//     let mut times_muted = 0;
+//     events.subscribe::<MutePlayer>(move |id| {
+//         // This mutation is now allowed because the closure is FnMut
+//         // and the EventManager uses Mutex for safe interior mutability.
+//         times_muted += 1;
+//         println!("[FnMut Closure] Muting player {} for the {} time.", id, times_muted);
+//     });
+//
+//     // You can even have multiple stateful closures for the same event.
+//     let mut mute_log: Vec<i32> = Vec::new();
+//     events.subscribe::<MutePlayer>(move |id| {
+//         mute_log.push(*id);
+//         println!("[FnMut Closure 2] Player IDs muted so far: {:?}", mute_log);
+//     });
+//
+//     println!("\n--- Emitting Events ---");
+//
+//     events.emit::<PlayerJoined>(&"Alice".to_string());
+//     events.emit::<MutePlayer>(&101);
+//     println!("---");
+//     events.emit::<MutePlayer>(&202);
+// }
